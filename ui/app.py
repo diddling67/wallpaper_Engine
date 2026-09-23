@@ -169,6 +169,7 @@ class ArchImgApp(ctk.CTk):
         self._source_frame = ctk.CTkFrame(frame, fg_color="transparent")
         self._source_frame.grid(row=0, column=1, sticky="ew", pady=8)
         self._source_checkboxes: dict[str, tuple[ctk.CTkCheckBox, ctk.BooleanVar]] = {}
+        self._source_remove_buttons: dict[str, ctk.CTkButton] = {}
 
         right = ctk.CTkFrame(frame, fg_color="transparent")
         right.grid(row=0, column=2, padx=12, pady=8, sticky="e")
@@ -472,6 +473,7 @@ class ArchImgApp(ctk.CTk):
     def _refresh_sources(self):
         old_children = list(self._source_frame.winfo_children())
         self._source_checkboxes.clear()
+        self._source_remove_buttons.clear()
 
         def _rebuild():
             if self._closed:
@@ -514,6 +516,7 @@ class ArchImgApp(ctk.CTk):
                         command=lambda n=name: self._on_remove_source(n),
                     )
                     rm_btn.pack(side="left", padx=(0, 8))
+                    self._source_remove_buttons[name] = rm_btn
 
             self._update_single_source_menu()
             self._update_categories()
@@ -556,14 +559,52 @@ class ArchImgApp(ctk.CTk):
         self._update_categories()
 
     def _on_remove_source(self, name: str):
-        self.registry.remove(name)
-        current = list(self.config.get("enabled_sources", []))
-        if name in current:
-            current.remove(name)
-            self.config.set("enabled_sources", current)
-        self._refresh_sources()
-        self._check_source_health()
-        self._status_label.configure(text=f"Removed source: {name}", text_color="#4CAF50")
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Remove Source")
+        dialog.geometry("380x180")
+        dialog.resizable(False, False)
+        dialog.grab_set()
+
+        ctk.CTkLabel(
+            dialog,
+            text=f"Remove source '{name}'?",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).pack(padx=20, pady=(25, 5))
+
+        ctk.CTkLabel(
+            dialog,
+            text="This will permanently delete the custom source.",
+            font=ctk.CTkFont(size=12),
+            text_color="gray60",
+        ).pack(padx=20, pady=(0, 20))
+
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_frame.pack(pady=(0, 20))
+
+        def _confirm():
+            dialog.destroy()
+            self.registry.remove(name)
+            current = list(self.config.get("enabled_sources", []))
+            if name in current:
+                current.remove(name)
+                self.config.set("enabled_sources", current)
+            self._refresh_sources()
+            self._check_source_health()
+            self._status_label.configure(text=f"Removed source: {name}", text_color="#4CAF50")
+
+        def _cancel():
+            dialog.destroy()
+
+        ctk.CTkButton(
+            btn_frame, text="Cancel", width=100, height=32,
+            fg_color=("gray70", "gray30"), command=_cancel,
+        ).pack(side="left", padx=10)
+        ctk.CTkButton(
+            btn_frame, text="Remove", width=100, height=32,
+            fg_color="#E53935", hover_color="#C62828", command=_confirm,
+        ).pack(side="left", padx=10)
+
+        dialog.after(50, lambda: dialog.attributes("-topmost", True))
 
     def _on_mode_change(self, mode: str):
         self.config.set("playlist_mode", mode)
