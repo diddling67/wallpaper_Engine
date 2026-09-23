@@ -12,7 +12,7 @@ class FavoritesManager:
         self.config_dir = Path(os.environ.get("APPDATA", os.path.expanduser("~"))) / "archimg_wallpaper"
         self.config_dir.mkdir(exist_ok=True)
         self.fav_file = self.config_dir / "favorites.md"
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._liked_urls: set[str] = set()
         self._items: list[WallpaperItem] = []
         self._unavailable: list[dict] = []
@@ -80,14 +80,17 @@ class FavoritesManager:
         return {"url": parts[0] if parts else "", "reason": parts[1] if len(parts) > 1 else "Unknown"}
 
     def _save(self):
+        with self._lock:
+            items_snapshot = list(self._items)
+            unavail_snapshot = list(self._unavailable)
         lines = ["# Wallpaper Engine Favorites", "", "## Liked Wallpapers"]
-        for item in self._items:
+        for item in items_snapshot:
             parts = [item.url, item.source_name, item.category or "", item.resolution or ""]
             lines.append("- " + " | ".join(parts))
         lines.append("")
-        if self._unavailable:
+        if unavail_snapshot:
             lines.append("## Removed (Unavailable)")
-            for entry in self._unavailable:
+            for entry in unavail_snapshot:
                 lines.append(f"- {entry['url']} | {entry['reason']}")
             lines.append("")
         try:
@@ -96,7 +99,8 @@ class FavoritesManager:
             pass
 
     def is_liked(self, url: str) -> bool:
-        return url in self._liked_urls
+        with self._lock:
+            return url in self._liked_urls
 
     def toggle_like(self, item: WallpaperItem) -> bool:
         with self._lock:
@@ -120,7 +124,8 @@ class FavoritesManager:
             return set(self._liked_urls)
 
     def get_count(self) -> int:
-        return len(self._items)
+        with self._lock:
+            return len(self._items)
 
     def check_availability(self, on_complete=None):
         def _do():

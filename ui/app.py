@@ -1,8 +1,5 @@
 import threading
 import customtkinter as ctk
-from PIL import Image
-import io
-import requests
 
 from sources.registry import SourceRegistry
 from sources.base import WallpaperItem
@@ -13,8 +10,11 @@ from core.favorites import FavoritesManager
 from core.wallpaper import set_wallpaper, get_screen_resolution
 from core.autostart import is_autostart_enabled, set_autostart
 
-PREVIEW_MAX = (400, 300)
-FAV_PREVIEW_MAX = (500, 250)
+PREVIEW_MAX = (450, 350)
+FAV_PREVIEW_MAX = (500, 280)
+
+PAD = 8
+BTN_H = 32
 
 
 class ArchImgApp(ctk.CTk):
@@ -22,20 +22,20 @@ class ArchImgApp(ctk.CTk):
         super().__init__()
 
         self.config = Config()
-        self.registry = SourceRegistry()
-        self.cache = CacheManager()
+        self.registry = SourceRegistry(config=self.config)
+        self.cache = CacheManager(max_size_mb=self.config.get("max_cache_mb", 500))
         self.favorites = FavoritesManager()
         self.engine = SlideshowEngine(on_change_callback=self._on_wallpaper_change)
 
         screen_w, screen_h = get_screen_resolution()
-        win_w = max(750, int(screen_w * 0.55))
-        win_h = max(550, int(screen_h * 0.70))
+        win_w = max(820, int(screen_w * 0.58))
+        win_h = max(620, int(screen_h * 0.75))
 
         self.title("Wallpaper Engine")
         self.geometry(f"{win_w}x{win_h}")
-        self.minsize(700, 500)
+        self.minsize(740, 540)
 
-        ctk.set_appearance_mode("dark")
+        ctk.set_appearance_mode(self.config.get("theme", "dark"))
         ctk.set_default_color_theme("blue")
 
         self._current_item: WallpaperItem | None = None
@@ -45,28 +45,30 @@ class ArchImgApp(ctk.CTk):
         self._countdown_id = None
         self._active_tab = "browse"
         self._apply_seq = 0
-        self._preview_size = (500, 300)
-        self._search_after_id = None
         self._interval_after_id = None
         self._closed = False
         self._fav_selected_url = None
-
+        self._history: list[WallpaperItem] = []
+        self._history_index = -1
         self._tray_icon = None
+        self._fetch_seq = 0
+        self._source_health: dict[str, bool | None] = {}
+        self._fav_rows: list[ctk.CTkFrame] = []
+        self._fav_preview_seq = 0
 
         self._build_ui()
         self._load_settings()
         self._refresh_sources()
 
-        self.bind("<Configure>", self._on_configure)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind("<Control-q>", lambda e: self._force_quit())
+        self.bind("<space>", lambda e: self._on_next() if self.focus_get() != self._search_entry else None)
+        self.bind("<Right>", lambda e: self._on_next() if self.focus_get() != self._search_entry else None)
+        self.bind("<Left>", lambda e: self._on_prev() if self.focus_get() != self._search_entry else None)
+        self.bind("<Return>", lambda e: self._on_search() if self.focus_get() != self._search_entry else None)
         self.after(200, self._start_tray)
-        self.after(1000, self._check_favorites_availability)
-
-    def _on_configure(self, event=None):
-        if event and event.widget == self:
-            pw = max(100, self.winfo_width() - 40)
-            ph = max(100, self.winfo_height() - 250)
-            self._preview_size = (pw, ph)
+        self.after(800, self._check_source_health)
+        self.after(1200, self._check_favorites_availability)
 
     def _build_ui(self):
         self.grid_columnconfigure(0, weight=1)
@@ -82,52 +84,73 @@ class ArchImgApp(ctk.CTk):
 
         self._show_tab("browse")
 
+    # ─── Tab Bar ───────────────────────────────────────────────────────────
+
     def _build_tab_bar(self):
-        bar = ctk.CTkFrame(self, height=40, corner_radius=0)
-        bar.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
+        bar = ctk.CTkFrame(self, height=48, corner_radius=0, fg_color=("gray88", "gray13"))
+        bar.grid(row=0, column=0, sticky="ew")
         bar.grid_columnconfigure(2, weight=1)
-        bar.grid_rowconfigure(0, weight=0)
-        bar.grid_rowconfigure(1, weight=0)
 
         self._tab_browse_btn = ctk.CTkButton(
-            bar, text="Browse", width=120, height=32,
-            corner_radius=0, fg_color=("gray75", "gray25"),
+            bar, text="  Browse  ", width=110, height=34, corner_radius=8,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color=("#2196F3", "#1976D2"),
+            hover_color=("#1E88E5", "#1565C0"),
             command=lambda: self._show_tab("browse"),
         )
-        self._tab_browse_btn.grid(row=0, column=0, padx=(0, 2), pady=4)
+        self._tab_browse_btn.grid(row=0, column=0, padx=(12, 4), pady=7)
 
         fav_count = self.favorites.get_count()
         self._tab_fav_btn = ctk.CTkButton(
-            bar, text=f"Favorites ({fav_count})", width=140, height=32,
-            corner_radius=0, fg_color=("gray75", "gray25"),
+            bar, text=f"  Favorites ({fav_count})  ", width=160, height=34, corner_radius=8,
+            font=ctk.CTkFont(size=13),
+            fg_color=("gray70", "gray30"),
+            hover_color=("gray60", "gray40"),
             command=lambda: self._show_tab("favorites"),
         )
-        self._tab_fav_btn.grid(row=0, column=1, padx=(2, 0), pady=4)
+        self._tab_fav_btn.grid(row=0, column=1, padx=4, pady=7)
 
         self._like_btn = ctk.CTkButton(
-            bar, text="Like", width=60, height=32,
-            corner_radius=0, fg_color=("gray75", "gray25"),
+            bar, text="Like", width=80, height=34, corner_radius=8,
+            font=ctk.CTkFont(size=12),
+            fg_color=("gray70", "gray30"),
+            hover_color=("#E53935", "#C62828"),
             command=self._on_toggle_like,
         )
-        self._like_btn.grid(row=0, column=3, padx=10, pady=4)
-
-        self._tab_indicator = ctk.CTkLabel(bar, text="", width=120, height=2, fg_color="#2196F3")
-        self._tab_indicator.grid(row=1, column=0, sticky="sw")
+        self._like_btn.grid(row=0, column=3, padx=(0, 12), pady=7)
 
     def _show_tab(self, tab: str):
         self._active_tab = tab
         if tab == "browse":
-            self._browse_frame.grid(row=1, column=0, padx=10, pady=5, sticky="nsew")
-            self._fav_frame.grid_forget()
-            self._tab_indicator.grid(row=1, column=0, sticky="sw")
+            self._hide_fav_frame()
+            self._browse_frame.grid(row=1, column=0, padx=PAD, pady=(PAD, 0), sticky="nsew")
+            self._tab_browse_btn.configure(fg_color=("#2196F3", "#1976D2"))
+            self._tab_fav_btn.configure(fg_color=("gray70", "gray30"))
         else:
-            self._browse_frame.grid_forget()
-            self._fav_frame.grid(row=1, column=0, padx=10, pady=5, sticky="nsew")
-            self._tab_indicator.grid(row=1, column=1, sticky="sw")
+            self._hide_browse_frame()
+            self._fav_frame.grid(row=1, column=0, padx=PAD, pady=(PAD, 0), sticky="nsew")
+            self._tab_browse_btn.configure(fg_color=("gray70", "gray30"))
+            self._tab_fav_btn.configure(fg_color=("#2196F3", "#1976D2"))
             self._refresh_favorites_list()
 
+    def _hide_fav_frame(self):
+        if not self._closed:
+            try:
+                self._fav_frame.grid_forget()
+            except Exception:
+                pass
+
+    def _hide_browse_frame(self):
+        if not self._closed:
+            try:
+                self._browse_frame.grid_forget()
+            except Exception:
+                pass
+
+    # ─── Browse Tab ────────────────────────────────────────────────────────
+
     def _build_browse_tab(self):
-        self._browse_frame = ctk.CTkFrame(self)
+        self._browse_frame = ctk.CTkFrame(self, corner_radius=10)
         self._browse_frame.grid_columnconfigure(0, weight=1)
         self._browse_frame.grid_rowconfigure(2, weight=1)
 
@@ -135,195 +158,273 @@ class ArchImgApp(ctk.CTk):
         self._build_search_panel()
         self._build_preview_panel()
 
+    def _build_source_panel(self):
+        frame = ctk.CTkFrame(self._browse_frame, corner_radius=8)
+        frame.grid(row=0, column=0, padx=PAD, pady=(PAD, 4), sticky="ew")
+        frame.grid_columnconfigure(1, weight=1)
+
+        lbl = ctk.CTkLabel(frame, text="Sources", font=ctk.CTkFont(size=12, weight="bold"))
+        lbl.grid(row=0, column=0, padx=(12, 8), pady=8, sticky="w")
+
+        self._source_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        self._source_frame.grid(row=0, column=1, sticky="ew", pady=8)
+        self._source_checkboxes: dict[str, tuple[ctk.CTkCheckBox, ctk.BooleanVar]] = {}
+
+        right = ctk.CTkFrame(frame, fg_color="transparent")
+        right.grid(row=0, column=2, padx=12, pady=8, sticky="e")
+
+        self._add_source_btn = ctk.CTkButton(
+            right, text="+ Add Source", width=100, height=BTN_H, corner_radius=6,
+            font=ctk.CTkFont(size=11),
+            fg_color=("#4CAF50", "#388E3C"),
+            hover_color=("#43A047", "#2E7D32"),
+            command=self._open_add_source_dialog,
+        )
+        self._add_source_btn.pack(side="left", padx=(0, 8))
+
+        ctk.CTkLabel(right, text="Mode:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(8, 4))
+        self._mode_var = ctk.StringVar(value=self.config.get("playlist_mode", "merged"))
+        self._mode_menu = ctk.CTkOptionMenu(
+            right, variable=self._mode_var,
+            values=["merged", "single"], width=90, height=BTN_H,
+            font=ctk.CTkFont(size=11), corner_radius=6,
+            command=self._on_mode_change,
+        )
+        self._mode_menu.pack(side="left", padx=(0, 4))
+
+        self._single_source_var = ctk.StringVar(value="ArchImg")
+        self._single_source_menu = ctk.CTkOptionMenu(
+            right, variable=self._single_source_var,
+            values=["ArchImg"], width=110, height=BTN_H,
+            font=ctk.CTkFont(size=11), corner_radius=6,
+            command=self._on_single_source_change,
+        )
+
+    def _build_search_panel(self):
+        frame = ctk.CTkFrame(self._browse_frame, corner_radius=8)
+        frame.grid(row=1, column=0, padx=PAD, pady=4, sticky="ew")
+        frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(frame, text="Search", font=ctk.CTkFont(size=12, weight="bold")).grid(
+            row=0, column=0, padx=(12, 8), pady=8, sticky="w"
+        )
+
+        self._search_entry = ctk.CTkEntry(
+            frame, placeholder_text="nature, cyberpunk, linux...", height=BTN_H,
+            font=ctk.CTkFont(size=12),
+        )
+        self._search_entry.grid(row=0, column=1, padx=4, pady=8, sticky="ew")
+        self._search_entry.bind("<Return>", lambda e: self._on_search())
+
+        self._search_btn = ctk.CTkButton(
+            frame, text="Search", width=80, height=BTN_H, corner_radius=6,
+            font=ctk.CTkFont(size=12),
+            command=self._on_search,
+        )
+        self._search_btn.grid(row=0, column=2, padx=4, pady=8)
+
+        ctk.CTkLabel(frame, text="Category", font=ctk.CTkFont(size=12)).grid(
+            row=0, column=3, padx=(12, 4), pady=8, sticky="w"
+        )
+        self._category_var = ctk.StringVar(value="All")
+        self._category_menu = ctk.CTkOptionMenu(
+            frame, variable=self._category_var, values=["All"], width=110,
+            height=BTN_H, font=ctk.CTkFont(size=11), corner_radius=6,
+            command=self._on_category_change,
+        )
+        self._category_menu.grid(row=0, column=4, padx=(4, 12), pady=8)
+
+    def _build_preview_panel(self):
+        self._preview_frame = ctk.CTkFrame(self._browse_frame, corner_radius=8)
+        self._preview_frame.grid(row=2, column=0, padx=PAD, pady=(4, PAD), sticky="nsew")
+        self._preview_frame.grid_rowconfigure(0, weight=1)
+        self._preview_frame.grid_columnconfigure(0, weight=1)
+
+        self._preview_label = ctk.CTkLabel(
+            self._preview_frame, text="Press Refresh to load wallpapers",
+            font=ctk.CTkFont(size=13), text_color="gray50",
+        )
+        self._preview_label.grid(row=0, column=0, padx=16, pady=16, sticky="nsew")
+
+        self._preview_info = ctk.CTkLabel(
+            self._preview_frame, text="",
+            font=ctk.CTkFont(size=11), text_color="gray60",
+        )
+        self._preview_info.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="s")
+
+    # ─── Controls Panel ────────────────────────────────────────────────────
+
+    def _build_controls_panel(self):
+        frame = ctk.CTkFrame(self, height=52, corner_radius=0, fg_color=("gray88", "gray13"))
+        frame.grid(row=2, column=0, sticky="ew")
+        frame.grid_columnconfigure(1, weight=1)
+
+        # Transport buttons
+        transport = ctk.CTkFrame(frame, fg_color="transparent")
+        transport.grid(row=0, column=0, padx=(PAD, 0), pady=PAD, sticky="w")
+
+        btn_style = dict(width=44, height=BTN_H, corner_radius=8, font=ctk.CTkFont(size=14))
+
+        self._prev_btn = ctk.CTkButton(
+            transport, text="\u25C0", **btn_style,
+            fg_color=("gray70", "gray30"), hover_color=("gray60", "gray40"),
+            command=self._on_prev,
+        )
+        self._prev_btn.pack(side="left", padx=3)
+
+        self._play_btn = ctk.CTkButton(
+            transport, text="\u23F8", **btn_style,
+            fg_color=("#2196F3", "#1976D2"), hover_color=("#1E88E5", "#1565C0"),
+            command=self._on_toggle_play,
+        )
+        self._play_btn.pack(side="left", padx=3)
+
+        self._next_btn = ctk.CTkButton(
+            transport, text="\u25B6", **btn_style,
+            fg_color=("gray70", "gray30"), hover_color=("gray60", "gray40"),
+            command=self._on_next,
+        )
+        self._next_btn.pack(side="left", padx=3)
+
+        sep = ctk.CTkLabel(transport, text="|", text_color="gray50", width=12)
+        sep.pack(side="left", padx=6)
+
+        ctk.CTkButton(
+            transport, text="Shuffle", width=72, height=BTN_H, corner_radius=6,
+            font=ctk.CTkFont(size=11),
+            fg_color=("gray70", "gray30"), hover_color=("gray60", "gray40"),
+            command=self._on_shuffle,
+        ).pack(side="left", padx=3)
+
+        self._refresh_btn = ctk.CTkButton(
+            transport, text="Refresh", width=72, height=BTN_H, corner_radius=6,
+            font=ctk.CTkFont(size=11),
+            fg_color=("#4CAF50", "#388E3C"), hover_color=("#43A047", "#2E7D32"),
+            command=self._refresh_sources,
+        )
+        self._refresh_btn.pack(side="left", padx=3)
+
+        # Settings
+        settings = ctk.CTkFrame(frame, fg_color="transparent")
+        settings.grid(row=0, column=1, padx=(0, PAD), pady=PAD, sticky="e")
+
+        ctk.CTkLabel(settings, text="Interval:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 4))
+        self._interval_slider = ctk.CTkSlider(
+            settings, from_=5, to=300, number_of_steps=59, width=130, height=16,
+            command=self._on_interval_change,
+        )
+        self._interval_slider.set(self.config.get("interval", 30))
+        self._interval_slider.pack(side="left", padx=(0, 4))
+
+        self._interval_label = ctk.CTkLabel(
+            settings, text=f"{self.config.get('interval', 30)}s",
+            width=36, font=ctk.CTkFont(size=11),
+        )
+        self._interval_label.pack(side="left", padx=(0, 10))
+
+        ctk.CTkLabel(settings, text="Style:", font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 4))
+        self._style_var = ctk.StringVar(value=self.config.get("style", "Fill"))
+        self._style_menu = ctk.CTkOptionMenu(
+            settings, variable=self._style_var,
+            values=["Fill", "Fit", "Stretch", "Tile", "Center", "Span"],
+            width=80, height=BTN_H, corner_radius=6,
+            font=ctk.CTkFont(size=11),
+            command=self._on_style_change,
+        )
+        self._style_menu.pack(side="left", padx=(0, 10))
+
+        self._autostart_var = ctk.BooleanVar(value=self.config.get("auto_start", False))
+        self._autostart_cb = ctk.CTkCheckBox(
+            settings, text="Auto-start", variable=self._autostart_var,
+            font=ctk.CTkFont(size=11),
+            command=self._on_autostart_toggle,
+        )
+        self._autostart_cb.pack(side="left", padx=(4, 0))
+
+    # ─── Status Bar ────────────────────────────────────────────────────────
+
+    def _build_status_bar(self):
+        bar = ctk.CTkFrame(self, height=28, corner_radius=0, fg_color=("gray88", "gray13"))
+        bar.grid(row=3, column=0, sticky="ew")
+        bar.grid_columnconfigure(0, weight=1)
+
+        self._status_label = ctk.CTkLabel(
+            bar, text="Ready",
+            font=ctk.CTkFont(size=11), text_color="gray50", anchor="w",
+        )
+        self._status_label.grid(row=0, column=0, padx=12, pady=4, sticky="ew")
+
+        hint = ctk.CTkLabel(
+            bar, text="Space=Next  \u2190\u2192=Navigate  Enter=Search",
+            font=ctk.CTkFont(size=10), text_color="gray40", anchor="e",
+        )
+        hint.grid(row=0, column=1, padx=12, pady=4, sticky="e")
+
+    # ─── Favorites Tab ─────────────────────────────────────────────────────
+
     def _build_favorites_tab(self):
-        self._fav_frame = ctk.CTkFrame(self)
+        self._fav_frame = ctk.CTkFrame(self, corner_radius=10)
         self._fav_frame.grid_columnconfigure(0, weight=1)
         self._fav_frame.grid_rowconfigure(1, weight=1)
 
         header = ctk.CTkFrame(self._fav_frame, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
+        header.grid(row=0, column=0, sticky="ew", padx=PAD, pady=(PAD, 4))
         header.grid_columnconfigure(1, weight=1)
 
         self._fav_title_label = ctk.CTkLabel(
             header, text=f"Your Favorites ({self.favorites.get_count()})",
             font=ctk.CTkFont(size=14, weight="bold"),
         )
-        self._fav_title_label.grid(row=0, column=0, sticky="w")
+        self._fav_title_label.grid(row=0, column=0, sticky="w", padx=(4, 0))
 
         ctk.CTkButton(
-            header, text="Check Availability", width=140,
+            header, text="Check Availability", width=150, height=BTN_H, corner_radius=6,
+            font=ctk.CTkFont(size=11),
+            fg_color=("gray70", "gray30"), hover_color=("gray60", "gray40"),
             command=self._on_check_fav_availability,
         ).grid(row=0, column=1, sticky="e")
 
-        self._fav_list_frame = ctk.CTkScrollableFrame(self._fav_frame)
-        self._fav_list_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
+        self._fav_list_frame = ctk.CTkScrollableFrame(
+            self._fav_frame, corner_radius=8,
+            scrollbar_button_color="gray40", scrollbar_button_hover_color="gray50",
+        )
+        self._fav_list_frame.grid(row=1, column=0, sticky="nsew", padx=PAD, pady=4)
         self._fav_list_frame.grid_columnconfigure(0, weight=1)
-        self._fav_rows: list[ctk.CTkFrame] = []
 
-        self._fav_preview_frame = ctk.CTkFrame(self._fav_frame, height=180)
-        self._fav_preview_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 5))
+        self._fav_preview_frame = ctk.CTkFrame(self._fav_frame, height=160, corner_radius=8)
+        self._fav_preview_frame.grid(row=2, column=0, sticky="ew", padx=PAD, pady=(0, 4))
         self._fav_preview_frame.grid_columnconfigure(0, weight=1)
 
         self._fav_preview_label = ctk.CTkLabel(
-            self._fav_preview_frame, text="Select a favorite to preview", text_color="gray",
+            self._fav_preview_frame, text="Select a favorite to preview",
+            text_color="gray50", font=ctk.CTkFont(size=12),
         )
-        self._fav_preview_label.grid(row=0, column=0, padx=10, pady=5, sticky="nsew")
+        self._fav_preview_label.grid(row=0, column=0, padx=12, pady=8, sticky="nsew")
 
         self._fav_preview_info = ctk.CTkLabel(
-            self._fav_preview_frame, text="", font=ctk.CTkFont(size=10), text_color="gray",
+            self._fav_preview_frame, text="",
+            font=ctk.CTkFont(size=10), text_color="gray50",
         )
-        self._fav_preview_info.grid(row=1, column=0, padx=10, pady=(0, 5))
+        self._fav_preview_info.grid(row=1, column=0, padx=12, pady=(0, 8))
 
         fav_btn_frame = ctk.CTkFrame(self._fav_frame, fg_color="transparent")
-        fav_btn_frame.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 5))
+        fav_btn_frame.grid(row=3, column=0, sticky="ew", padx=PAD, pady=(0, PAD))
 
         ctk.CTkButton(
-            fav_btn_frame, text="Play Favorites", width=120,
+            fav_btn_frame, text="Play Favorites", width=130, height=BTN_H, corner_radius=6,
+            font=ctk.CTkFont(size=12),
+            fg_color=("#2196F3", "#1976D2"), hover_color=("#1E88E5", "#1565C0"),
             command=self._on_play_favorites,
-        ).pack(side="left", padx=5)
+        ).pack(side="left", padx=(4, 0))
 
         ctk.CTkButton(
-            fav_btn_frame, text="Remove Selected", width=120, fg_color="#cc3333",
+            fav_btn_frame, text="Remove Selected", width=130, height=BTN_H, corner_radius=6,
+            font=ctk.CTkFont(size=12),
+            fg_color=("#E53935", "#C62828"), hover_color=("#D32F2F", "#B71C1C"),
             command=self._on_remove_selected_fav,
-        ).pack(side="right", padx=5)
+        ).pack(side="right", padx=(0, 4))
 
-    def _build_source_panel(self):
-        frame = ctk.CTkFrame(self._browse_frame)
-        frame.grid(row=0, column=0, padx=10, pady=(5, 3), sticky="ew")
-        frame.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(frame, text="Sources:", font=ctk.CTkFont(weight="bold")).grid(
-            row=0, column=0, padx=(10, 5), pady=5
-        )
-
-        self._source_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        self._source_frame.grid(row=0, column=1, sticky="ew", padx=5, pady=5)
-        self._source_checkboxes: dict[str, ctk.CTkCheckBox] = {}
-
-        self._add_source_btn = ctk.CTkButton(
-            frame, text="+ Add Source", width=100,
-            command=self._open_add_source_dialog,
-        )
-        self._add_source_btn.grid(row=0, column=2, padx=10, pady=5)
-
-        mode_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        mode_frame.grid(row=0, column=3, padx=10, pady=5)
-
-        ctk.CTkLabel(mode_frame, text="Mode:").pack(side="left", padx=(0, 5))
-        self._mode_var = ctk.StringVar(value=self.config.get("playlist_mode", "merged"))
-        self._mode_menu = ctk.CTkOptionMenu(
-            mode_frame, variable=self._mode_var,
-            values=["merged", "single"], width=100,
-            command=self._on_mode_change,
-        )
-        self._mode_menu.pack(side="left")
-
-        self._single_source_var = ctk.StringVar(value="ArchImg")
-        self._single_source_menu = ctk.CTkOptionMenu(
-            mode_frame, variable=self._single_source_var,
-            values=["ArchImg"], width=120,
-            command=self._on_single_source_change,
-        )
-
-    def _build_search_panel(self):
-        frame = ctk.CTkFrame(self._browse_frame)
-        frame.grid(row=1, column=0, padx=10, pady=3, sticky="ew")
-        frame.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(frame, text="Search:").grid(row=0, column=0, padx=(10, 5), pady=5)
-        self._search_entry = ctk.CTkEntry(
-            frame, placeholder_text="Search tags: nature, cyberpunk, linux...", width=300,
-        )
-        self._search_entry.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-
-        self._search_btn = ctk.CTkButton(
-            frame, text="Search", width=80, command=self._on_search
-        )
-        self._search_btn.grid(row=0, column=2, padx=5, pady=5)
-
-        ctk.CTkLabel(frame, text="Category:").grid(row=0, column=3, padx=(15, 5), pady=5)
-        self._category_var = ctk.StringVar(value="All")
-        self._category_menu = ctk.CTkOptionMenu(
-            frame, variable=self._category_var, values=["All"], width=120,
-            command=self._on_category_change,
-        )
-        self._category_menu.grid(row=0, column=4, padx=5, pady=5)
-
-    def _build_preview_panel(self):
-        self._preview_frame = ctk.CTkFrame(self._browse_frame)
-        self._preview_frame.grid(row=2, column=0, padx=10, pady=3, sticky="nsew")
-        self._preview_frame.grid_rowconfigure(0, weight=1)
-        self._preview_frame.grid_columnconfigure(0, weight=1)
-
-        self._preview_label = ctk.CTkLabel(
-            self._preview_frame, text="No wallpaper loaded", font=ctk.CTkFont(size=14),
-        )
-        self._preview_label.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
-
-        self._preview_info = ctk.CTkLabel(
-            self._preview_frame, text="", font=ctk.CTkFont(size=11), text_color="gray",
-        )
-        self._preview_info.grid(row=1, column=0, padx=10, pady=(0, 5), sticky="s")
-
-    def _build_controls_panel(self):
-        frame = ctk.CTkFrame(self)
-        frame.grid(row=2, column=0, padx=10, pady=3, sticky="ew")
-        frame.grid_columnconfigure(3, weight=1)
-
-        btn_frame = ctk.CTkFrame(frame, fg_color="transparent")
-        btn_frame.grid(row=0, column=0, columnspan=2, padx=10, pady=5, sticky="w")
-
-        self._prev_btn = ctk.CTkButton(btn_frame, text="|<", width=40, command=self._on_prev)
-        self._prev_btn.pack(side="left", padx=2)
-
-        self._play_btn = ctk.CTkButton(btn_frame, text="||", width=40, command=self._on_toggle_play)
-        self._play_btn.pack(side="left", padx=2)
-
-        self._next_btn = ctk.CTkButton(btn_frame, text=">|", width=40, command=self._on_next)
-        self._next_btn.pack(side="left", padx=2)
-
-        self._shuffle_btn = ctk.CTkButton(btn_frame, text="Shuffle", width=70, command=self._on_shuffle)
-        self._shuffle_btn.pack(side="left", padx=(10, 2))
-
-        self._refresh_btn = ctk.CTkButton(btn_frame, text="Refresh", width=70, command=self._refresh_sources)
-        self._refresh_btn.pack(side="left", padx=2)
-
-        sf = ctk.CTkFrame(frame, fg_color="transparent")
-        sf.grid(row=0, column=2, columnspan=2, padx=10, pady=5, sticky="e")
-
-        ctk.CTkLabel(sf, text="Interval:").pack(side="left", padx=(0, 5))
-        self._interval_slider = ctk.CTkSlider(
-            sf, from_=5, to=300, number_of_steps=59, width=150,
-            command=self._on_interval_change,
-        )
-        self._interval_slider.set(self.config.get("interval", 30))
-        self._interval_slider.pack(side="left", padx=5)
-
-        self._interval_label = ctk.CTkLabel(sf, text=f"{self.config.get('interval', 30)}s", width=40)
-        self._interval_label.pack(side="left", padx=5)
-
-        ctk.CTkLabel(sf, text="Style:").pack(side="left", padx=(10, 5))
-        self._style_var = ctk.StringVar(value=self.config.get("style", "Fill"))
-        self._style_menu = ctk.CTkOptionMenu(
-            sf, variable=self._style_var,
-            values=["Fill", "Fit", "Stretch", "Tile", "Center", "Span"],
-            width=80, command=self._on_style_change,
-        )
-        self._style_menu.pack(side="left")
-
-        self._autostart_var = ctk.BooleanVar(value=self.config.get("auto_start", False))
-        self._autostart_cb = ctk.CTkCheckBox(
-            sf, text="Auto-start", variable=self._autostart_var,
-            command=self._on_autostart_toggle,
-        )
-        self._autostart_cb.pack(side="left", padx=(15, 5))
-
-    def _build_status_bar(self):
-        self._status_label = ctk.CTkLabel(
-            self, text="Ready | Select sources and click Refresh",
-            font=ctk.CTkFont(size=11), text_color="gray", anchor="w",
-        )
-        self._status_label.grid(row=3, column=0, padx=10, pady=(0, 5), sticky="ew")
+    # ─── Settings ──────────────────────────────────────────────────────────
 
     def _load_settings(self):
         self._interval_slider.set(self.config.get("interval", 30))
@@ -332,24 +433,83 @@ class ArchImgApp(ctk.CTk):
         self.engine.shuffle = self.config.get("shuffle", True)
         if is_autostart_enabled():
             self._autostart_var.set(True)
+        if self.config.get("playlist_mode") == "single":
+            self._single_source_menu.pack(side="left", padx=(4, 0))
+        wh = self.registry.get("Wallhaven")
+        if wh:
+            wh.api_key = self.config.get("wallhaven_api_key", "")
+            wh.min_resolution = self.config.get("wallhaven_min_resolution", "1920x1080")
+
+    # ─── Source Management ─────────────────────────────────────────────────
+
+    def _check_source_health(self):
+        if self._closed:
+            return
+
+        def _do():
+            for name, src in self.registry.get_all().items():
+                try:
+                    available = src.is_available()
+                except Exception:
+                    available = False
+                self._source_health[name] = available
+            if not self._closed:
+                self.after(0, self._update_source_health_ui)
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _update_source_health_ui(self):
+        if self._closed:
+            return
+        enabled = self.config.get("enabled_sources", [])
+        unhealthy = [n for n in enabled if self._source_health.get(n) is False]
+        if unhealthy:
+            self._status_label.configure(
+                text=f"Warning: {', '.join(unhealthy)} appear(s) offline",
+                text_color="#FF9800",
+            )
 
     def _refresh_sources(self):
-        for widget in self._source_frame.winfo_children():
-            widget.destroy()
+        old_children = list(self._source_frame.winfo_children())
         self._source_checkboxes.clear()
 
-        enabled = self.config.get("enabled_sources", ["ArchImg", "Wallhaven"])
-        for name in self.registry.get_all():
-            var = ctk.BooleanVar(value=name in enabled)
-            cb = ctk.CTkCheckBox(
-                self._source_frame, text=name, variable=var,
-                command=lambda n=name, v=var: self._on_source_toggle(n, v.get()),
-            )
-            cb.pack(side="left", padx=5)
-            self._source_checkboxes[name] = (cb, var)
+        def _rebuild():
+            if self._closed:
+                return
+            for w in old_children:
+                try:
+                    w.pack_forget()
+                    w.destroy()
+                except Exception:
+                    pass
 
-        self._update_single_source_menu()
-        self._update_categories()
+            enabled = self.config.get("enabled_sources", ["ArchImg", "Wallhaven"])
+            for name in self.registry.get_all():
+                var = ctk.BooleanVar(value=name in enabled)
+                health = self._source_health.get(name)
+                prefix = ""
+                color = None
+                if health is True:
+                    prefix = "\u2714 "
+                    color = "#4CAF50"
+                elif health is False:
+                    prefix = "\u2716 "
+                    color = "#F44336"
+
+                cb = ctk.CTkCheckBox(
+                    self._source_frame, text=prefix + name, variable=var,
+                    font=ctk.CTkFont(size=11),
+                    command=lambda n=name, v=var: self._on_source_toggle(n, v.get()),
+                )
+                if color:
+                    cb.configure(text_color=color)
+                cb.pack(side="left", padx=(0, 10))
+                self._source_checkboxes[name] = (cb, var)
+
+            self._update_single_source_menu()
+            self._update_categories()
+
+        self.after_idle(_rebuild)
 
     def _update_single_source_menu(self):
         names = list(self._source_checkboxes.keys())
@@ -377,7 +537,7 @@ class ArchImgApp(ctk.CTk):
                 return
 
     def _on_source_toggle(self, name: str, enabled: bool):
-        current = self.config.get("enabled_sources", [])
+        current = list(self.config.get("enabled_sources", []))
         if enabled and name not in current:
             current.append(name)
         elif not enabled and name in current:
@@ -389,7 +549,7 @@ class ArchImgApp(ctk.CTk):
     def _on_mode_change(self, mode: str):
         self.config.set("playlist_mode", mode)
         if mode == "single":
-            self._single_source_menu.pack(side="left", padx=(5, 0))
+            self._single_source_menu.pack(side="left", padx=(4, 0))
         else:
             self._single_source_menu.pack_forget()
 
@@ -399,16 +559,21 @@ class ArchImgApp(ctk.CTk):
             self._fetch_and_load(source=source)
 
     def _on_search(self):
-        self._fetch_and_load(query=self._search_entry.get().strip() or None)
+        query = self._search_entry.get().strip() or None
+        self._fetch_and_load(query=query)
 
     def _on_category_change(self, category: str):
         self._fetch_and_load(category=category if category != "All" else None)
 
+    # ─── Fetch & Load ──────────────────────────────────────────────────────
+
     def _fetch_and_load(self, query=None, category=None, source=None):
         if self._closed:
             return
-        self._status_label.configure(text="Fetching wallpapers...")
-        self.update_idletasks()
+        self._fetch_seq += 1
+        seq = self._fetch_seq
+        self._refresh_btn.configure(state="disabled", text="Loading...")
+        self._status_label.configure(text="Fetching wallpapers...", text_color="gray50")
 
         def _do():
             mode = self.config.get("playlist_mode", "merged")
@@ -418,7 +583,7 @@ class ArchImgApp(ctk.CTk):
             else:
                 enabled = self.config.get("enabled_sources", [])
                 items = self.registry.fetch_all(enabled, query=query, category=category, limit_per_source=50)
-            if not self._closed:
+            if not self._closed and seq == self._fetch_seq:
                 self.after(0, lambda: self._on_fetch_complete(items))
 
         threading.Thread(target=_do, daemon=True).start()
@@ -426,22 +591,32 @@ class ArchImgApp(ctk.CTk):
     def _on_fetch_complete(self, items: list[WallpaperItem]):
         if self._closed:
             return
+        self._refresh_btn.configure(state="normal", text="Refresh")
+
         if not items:
-            self._status_label.configure(text="No wallpapers found. Check source settings.")
+            self._status_label.configure(
+                text="No wallpapers found. Try different search or check source settings.",
+                text_color="#FF9800",
+            )
             return
 
         self.engine.set_playlist(items)
         src_count = len(set(i.source_name for i in items))
-        self._status_label.configure(text=f"Loaded {len(items)} wallpapers from {src_count} source(s)")
+        self._status_label.configure(
+            text=f"Loaded {len(items)} wallpapers from {src_count} source(s)",
+            text_color="#4CAF50",
+        )
 
         if not self.engine.playing:
             self.engine.start()
-            self._play_btn.configure(text="||")
+            self._play_btn.configure(text="\u23F8")
             self._start_countdown()
 
         item = self.engine.get_current()
         if item:
             self._apply_wallpaper(item)
+
+    # ─── Wallpaper Engine ──────────────────────────────────────────────────
 
     def _on_wallpaper_change(self, item: WallpaperItem):
         if not self._closed:
@@ -453,32 +628,51 @@ class ArchImgApp(ctk.CTk):
         self._current_item = item
         self._apply_seq += 1
         seq = self._apply_seq
-        self._status_label.configure(text=f"Loading: {item.title} from {item.source_name}...")
+        self._status_label.configure(text=f"Loading: {item.title}...", text_color="gray50")
 
         def _do():
             path = self.cache.download(item.url)
             if path and seq == self._apply_seq and not self._closed:
                 style = self.config.get("style", "Fill")
-                success = set_wallpaper(str(path), style)
+                success, err = set_wallpaper(str(path), style)
                 if not self._closed:
-                    self.after(0, lambda: self._on_wallpaper_set(item, success))
+                    self.after(0, lambda: self._on_wallpaper_set(item, success, err))
             elif not self._closed and seq == self._apply_seq:
-                self.after(0, lambda: self._status_label.configure(text=f"Failed: {item.title}"))
+                self.after(0, lambda: self._status_label.configure(
+                    text=f"Failed to download: {item.title}", text_color="#F44336"
+                ))
 
         threading.Thread(target=_do, daemon=True).start()
 
-    def _on_wallpaper_set(self, item: WallpaperItem, success: bool):
+    def _on_wallpaper_set(self, item: WallpaperItem, success: bool, err: str = ""):
         if self._closed:
             return
         if success:
             pos, total = self.engine.get_position()
-            self._preview_info.configure(text=f"{item.source_name} | {item.title} | {pos}/{total}")
-            self._status_label.configure(text=f"Playing | Next in {self.engine.interval}s")
+            self._preview_info.configure(
+                text=f"{item.source_name}  \u2022  {item.title}  \u2022  {pos}/{total}"
+            )
+            self._status_label.configure(
+                text=f"Playing  \u2022  Next in {self.engine.interval}s",
+                text_color="#4CAF50",
+            )
             self._load_preview(item)
-            self._reset_countdown()
             self._update_like_button()
+
+            if self.engine.playing:
+                self._start_countdown()
+
+            if item not in self._history:
+                self._history.append(item)
+                if len(self._history) > 200:
+                    self._history = self._history[-200:]
+                self._history_index = len(self._history) - 1
+            else:
+                self._history_index = self._history.index(item)
         else:
-            self._status_label.configure(text=f"Failed to set wallpaper: {item.title}")
+            self._status_label.configure(
+                text=f"Failed: {item.title} ({err})", text_color="#F44336"
+            )
 
     def _load_preview(self, item: WallpaperItem):
         if self._closed:
@@ -490,10 +684,13 @@ class ArchImgApp(ctk.CTk):
             if self._closed or seq != self._apply_seq:
                 return
             try:
-                img = self.cache.download_thumb(url, max_size=PREVIEW_MAX, timeout=8)
-                if img and seq == self._apply_seq and not self._closed:
-                    photo = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
-                    self.after(0, lambda: self._set_preview(photo))
+                img = self.cache.download_thumb(url, max_size=PREVIEW_MAX, timeout=10)
+                if img:
+                    if seq == self._apply_seq and not self._closed:
+                        photo = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
+                        self.after(0, lambda: self._set_preview(photo))
+                    else:
+                        img.close()
             except Exception:
                 pass
 
@@ -502,15 +699,26 @@ class ArchImgApp(ctk.CTk):
     def _set_preview(self, photo):
         if self._closed:
             return
-        self._preview_label.configure(image=photo, text="")
         old = self._preview_image
         self._preview_image = photo
-        del old
+        self._preview_label.configure(image=photo, text="")
+        if old:
+            try:
+                old.close()
+            except Exception:
+                pass
+
+    # ─── Transport Controls ────────────────────────────────────────────────
 
     def _on_prev(self):
-        item = self.engine.previous()
-        if item:
+        if self._history and self._history_index > 0:
+            self._history_index -= 1
+            item = self._history[self._history_index]
             self._apply_wallpaper(item)
+        else:
+            item = self.engine.previous()
+            if item:
+                self._apply_wallpaper(item)
 
     def _on_next(self):
         item = self.engine.next()
@@ -520,10 +728,10 @@ class ArchImgApp(ctk.CTk):
     def _on_toggle_play(self):
         self.engine.toggle()
         if self.engine.playing:
-            self._play_btn.configure(text="||")
+            self._play_btn.configure(text="\u23F8")
             self._start_countdown()
         else:
-            self._play_btn.configure(text=">")
+            self._play_btn.configure(text="\u25B6")
             self._stop_countdown()
 
     def _on_shuffle(self):
@@ -550,11 +758,20 @@ class ArchImgApp(ctk.CTk):
         if self._current_item:
             path = self.cache.get_cache_path(self._current_item.url)
             if path.exists():
-                set_wallpaper(str(path), style)
+                def _do():
+                    success, err = set_wallpaper(str(path), style)
+                    if not self._closed:
+                        if not success:
+                            self.after(0, lambda: self._status_label.configure(
+                                text=f"Style change failed: {err}", text_color="#F44336"
+                            ))
+                threading.Thread(target=_do, daemon=True).start()
 
     def _on_autostart_toggle(self):
         set_autostart(self._autostart_var.get())
         self.config.set("auto_start", self._autostart_var.get())
+
+    # ─── Countdown ─────────────────────────────────────────────────────────
 
     def _start_countdown(self):
         self._stop_countdown()
@@ -566,16 +783,18 @@ class ArchImgApp(ctk.CTk):
             self.after_cancel(self._countdown_id)
             self._countdown_id = None
 
-    def _reset_countdown(self):
-        self._seconds_left = self.engine.interval
-
     def _tick_countdown(self):
         if self._closed or not self.engine.playing:
             return
         if self._seconds_left > 0:
-            self._status_label.configure(text=f"Playing | Next in {self._seconds_left}s")
+            self._status_label.configure(
+                text=f"Playing  \u2022  Next in {self._seconds_left}s",
+                text_color="#4CAF50",
+            )
             self._seconds_left -= 1
             self._countdown_id = self.after(1000, self._tick_countdown)
+
+    # ─── Tray ──────────────────────────────────────────────────────────────
 
     def _start_tray(self):
         if self._closed:
@@ -589,8 +808,6 @@ class ArchImgApp(ctk.CTk):
         self._stop_countdown()
         if self._interval_after_id:
             self.after_cancel(self._interval_after_id)
-        if self._search_after_id:
-            self.after_cancel(self._search_after_id)
         self.withdraw()
 
     def _force_quit(self):
@@ -599,7 +816,6 @@ class ArchImgApp(ctk.CTk):
         self._stop_countdown()
         if self._tray_icon:
             self._tray_icon.stop()
-        self.cache.clear()
         self.destroy()
 
     def _open_add_source_dialog(self):
@@ -609,84 +825,110 @@ class ArchImgApp(ctk.CTk):
 
     def _on_sources_changed(self):
         self._refresh_sources()
+        self._check_source_health()
         self._fetch_and_load()
 
-    # --- Favorites ---
+    # ─── Favorites ─────────────────────────────────────────────────────────
 
     def _update_like_button(self):
         if not self._current_item:
-            self._like_btn.configure(text="Like", fg_color=("gray75", "gray25"))
+            self._like_btn.configure(text="Like", fg_color=("gray70", "gray30"))
             return
         if self.favorites.is_liked(self._current_item.url):
-            self._like_btn.configure(text="Liked", fg_color="#cc3333")
+            self._like_btn.configure(text="Liked", fg_color=("#E53935", "#C62828"))
         else:
-            self._like_btn.configure(text="Like", fg_color=("gray75", "gray25"))
+            self._like_btn.configure(text="Like", fg_color=("gray70", "gray30"))
 
     def _on_toggle_like(self):
         if not self._current_item:
             return
         liked = self.favorites.toggle_like(self._current_item)
         count = self.favorites.get_count()
-        self._tab_fav_btn.configure(text=f"Favorites ({count})")
+        self._tab_fav_btn.configure(text=f"  Favorites ({count})  ")
         self._fav_title_label.configure(text=f"Your Favorites ({count})")
         self._update_like_button()
-        self._status_label.configure(text=f"{'Added to' if liked else 'Removed from'} favorites")
+        self._status_label.configure(
+            text=f"{'Added to' if liked else 'Removed from'} favorites",
+            text_color="#4CAF50" if liked else "gray50",
+        )
 
     def _refresh_favorites_list(self):
-        for row in self._fav_rows:
-            row.destroy()
+        if self._closed:
+            return
+        old_rows = list(self._fav_rows)
         self._fav_rows.clear()
 
-        items = self.favorites.get_liked()
-        if not items:
-            lbl = ctk.CTkLabel(
-                self._fav_list_frame,
-                text="No favorites yet.\nBrowse wallpapers and click Like to add them here.",
-                text_color="gray", font=ctk.CTkFont(size=13),
-            )
-            lbl.grid(row=0, column=0, pady=40)
-            self._fav_rows.append(lbl)
-            return
+        def _rebuild():
+            if self._closed:
+                return
+            for row in old_rows:
+                try:
+                    row.grid_forget()
+                    row.destroy()
+                except Exception:
+                    pass
 
-        self._fav_selected_url = None
-        for i, item in enumerate(items):
-            row = ctk.CTkFrame(self._fav_list_frame)
-            row.grid(row=i, column=0, sticky="ew", padx=5, pady=2)
-            row.grid_columnconfigure(1, weight=1)
+            items = self.favorites.get_liked()
+            if not items:
+                lbl = ctk.CTkLabel(
+                    self._fav_list_frame,
+                    text="No favorites yet.\nBrowse wallpapers and click Like to add them here.",
+                    text_color="gray50", font=ctk.CTkFont(size=13),
+                )
+                lbl.grid(row=0, column=0, pady=50, padx=20)
+                self._fav_rows.append(lbl)
+                return
 
-            btn = ctk.CTkButton(
-                row, text=item.title, anchor="w", width=200,
-                fg_color="transparent", hover_color=("gray70", "gray30"),
-                command=lambda it=item: self._on_fav_item_click(it),
-            )
-            btn.grid(row=0, column=0, sticky="w", padx=5, pady=3)
+            self._fav_selected_url = None
+            for i, item in enumerate(items):
+                row = ctk.CTkFrame(self._fav_list_frame, corner_radius=6)
+                row.grid(row=i, column=0, sticky="ew", padx=4, pady=3)
+                row.grid_columnconfigure(1, weight=1)
 
-            info = ctk.CTkLabel(
-                row, text=f"{item.source_name} | {item.resolution or '?'}",
-                font=ctk.CTkFont(size=10), text_color="gray",
-            )
-            info.grid(row=0, column=1, sticky="w", padx=5)
+                title_btn = ctk.CTkButton(
+                    row, text=item.title, anchor="w", width=220, height=28,
+                    font=ctk.CTkFont(size=11),
+                    fg_color="transparent", hover_color=("gray75", "gray25"),
+                    text_color="white",
+                    command=lambda it=item: self._on_fav_item_click(it),
+                )
+                title_btn.grid(row=0, column=0, sticky="w", padx=(8, 4), pady=4)
 
-            play_btn = ctk.CTkButton(
-                row, text="Play", width=50, height=24,
-                command=lambda it=item: self._on_play_fav_item(it),
-            )
-            play_btn.grid(row=0, column=2, padx=5, pady=3)
+                info = ctk.CTkLabel(
+                    row, text=f"{item.source_name}  \u2022  {item.resolution or '?'}",
+                    font=ctk.CTkFont(size=10), text_color="gray50",
+                )
+                info.grid(row=0, column=1, sticky="w", padx=4)
 
-            self._fav_rows.append(row)
+                play_btn = ctk.CTkButton(
+                    row, text="Play", width=52, height=26, corner_radius=6,
+                    font=ctk.CTkFont(size=10),
+                    fg_color=("#2196F3", "#1976D2"), hover_color=("#1E88E5", "#1565C0"),
+                    command=lambda it=item: self._on_play_fav_item(it),
+                )
+                play_btn.grid(row=0, column=2, padx=(4, 8), pady=4)
+
+                self._fav_rows.append(row)
+
+        self.after_idle(_rebuild)
 
     def _on_fav_item_click(self, item: WallpaperItem):
         self._fav_selected_url = item.url
+        self._fav_preview_seq += 1
+        seq = self._fav_preview_seq
         url = item.thumbnail_url or item.url
 
         def _do():
             try:
-                img = self.cache.download_thumb(url, max_size=FAV_PREVIEW_MAX, timeout=8)
-                if img and not self._closed:
-                    photo = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
-                    self.after(0, lambda: self._set_fav_preview(photo, item))
+                img = self.cache.download_thumb(url, max_size=FAV_PREVIEW_MAX, timeout=10)
+                if img:
+                    if seq == self._fav_preview_seq and not self._closed:
+                        photo = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
+                        self.after(0, lambda: self._set_fav_preview(photo, item))
+                    else:
+                        img.close()
             except Exception:
-                if not self._closed:
+                if seq == self._fav_preview_seq and not self._closed:
                     self.after(0, lambda: self._fav_preview_info.configure(
                         text=f"Could not load preview for {item.title}"
                     ))
@@ -697,12 +939,16 @@ class ArchImgApp(ctk.CTk):
     def _set_fav_preview(self, photo, item: WallpaperItem):
         if self._closed:
             return
-        self._fav_preview_label.configure(image=photo, text="")
         old = self._fav_preview_image
         self._fav_preview_image = photo
-        del old
+        self._fav_preview_label.configure(image=photo, text="")
+        if old:
+            try:
+                old.close()
+            except Exception:
+                pass
         self._fav_preview_info.configure(
-            text=f"{item.title} | {item.source_name} | {item.resolution or 'Unknown'}"
+            text=f"{item.title}  \u2022  {item.source_name}  \u2022  {item.resolution or 'Unknown'}"
         )
 
     def _on_play_fav_item(self, item: WallpaperItem):
@@ -712,28 +958,28 @@ class ArchImgApp(ctk.CTk):
     def _on_play_favorites(self):
         items = self.favorites.get_liked()
         if not items:
-            self._status_label.configure(text="No favorites to play")
+            self._status_label.configure(text="No favorites to play", text_color="#FF9800")
             return
         self.engine.set_playlist(items)
         self.engine.start()
-        self._play_btn.configure(text="||")
+        self._play_btn.configure(text="\u23F8")
         self._start_countdown()
         item = self.engine.get_current()
         if item:
             self._apply_wallpaper(item)
         self._show_tab("browse")
-        self._status_label.configure(text=f"Playing {len(items)} favorites")
+        self._status_label.configure(text=f"Playing {len(items)} favorites", text_color="#4CAF50")
 
     def _on_remove_selected_fav(self):
         if not self._fav_selected_url:
-            self._status_label.configure(text="Select a favorite first")
+            self._status_label.configure(text="Select a favorite first", text_color="#FF9800")
             return
         for item in self.favorites.get_liked():
             if item.url == self._fav_selected_url:
                 self.favorites.toggle_like(item)
                 break
         count = self.favorites.get_count()
-        self._tab_fav_btn.configure(text=f"Favorites ({count})")
+        self._tab_fav_btn.configure(text=f"  Favorites ({count})  ")
         self._fav_title_label.configure(text=f"Your Favorites ({count})")
         self._fav_selected_url = None
         self._fav_preview_label.configure(image=None, text="Select a favorite to preview")
@@ -743,23 +989,31 @@ class ArchImgApp(ctk.CTk):
 
     def _check_favorites_availability(self):
         if not self._closed:
-            self.favorites.check_availability(on_complete=self._on_availability_checked)
+            self.favorites.check_availability(
+                on_complete=lambda r, rem: self.after(0, lambda: self._on_availability_checked(r, rem))
+            )
 
     def _on_check_fav_availability(self):
-        self._status_label.configure(text="Checking favorites availability...")
-        self.favorites.check_availability(on_complete=self._on_availability_checked)
+        self._status_label.configure(text="Checking favorites availability...", text_color="gray50")
+        self.favorites.check_availability(
+            on_complete=lambda r, rem: self.after(0, lambda: self._on_availability_checked(r, rem))
+        )
 
     def _on_availability_checked(self, removed_count, remaining):
         if self._closed:
             return
         if removed_count > 0:
             self._status_label.configure(
-                text=f"Removed {removed_count} unavailable favorite(s). {len(remaining)} still available."
+                text=f"Removed {removed_count} unavailable. {len(remaining)} still available.",
+                text_color="#FF9800",
             )
         elif remaining:
-            self._status_label.configure(text=f"All {len(remaining)} favorites available.")
+            self._status_label.configure(
+                text=f"All {len(remaining)} favorites available.",
+                text_color="#4CAF50",
+            )
         count = self.favorites.get_count()
-        self._tab_fav_btn.configure(text=f"Favorites ({count})")
+        self._tab_fav_btn.configure(text=f"  Favorites ({count})  ")
         self._fav_title_label.configure(text=f"Your Favorites ({count})")
         self._update_like_button()
         if self._active_tab == "favorites":

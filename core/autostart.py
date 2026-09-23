@@ -15,9 +15,13 @@ def get_exe_path() -> str:
 def is_autostart_enabled() -> bool:
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_READ)
-        winreg.QueryValueEx(key, APP_NAME)
-        winreg.CloseKey(key)
-        return True
+        try:
+            winreg.QueryValueEx(key, APP_NAME)
+            return True
+        except FileNotFoundError:
+            return False
+        finally:
+            winreg.CloseKey(key)
     except FileNotFoundError:
         return False
     except Exception:
@@ -27,13 +31,15 @@ def is_autostart_enabled() -> bool:
 def set_autostart(enable: bool):
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE)
-        if enable:
-            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, get_exe_path())
-        else:
-            try:
-                winreg.DeleteValue(key, APP_NAME)
-            except FileNotFoundError:
-                pass
-        winreg.CloseKey(key)
+        try:
+            if enable:
+                winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, get_exe_path())
+            else:
+                try:
+                    winreg.DeleteValue(key, APP_NAME)
+                except FileNotFoundError:
+                    pass
+        finally:
+            winreg.CloseKey(key)
     except Exception:
         pass

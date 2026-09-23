@@ -1,4 +1,4 @@
-import requests
+from core.cache import get_session
 from sources.base import WallpaperSource, WallpaperItem
 
 
@@ -10,13 +10,17 @@ class WallhavenSource(WallpaperSource):
     API_BASE = "https://wallhaven.cc/api/v1"
     CATEGORIES = {"General": "100", "Anime": "010", "People": "001"}
 
+    def __init__(self):
+        self.api_key = ""
+        self.min_resolution = "1920x1080"
+
     def fetch_wallpapers(
         self, query: str = None, category: str = None, limit: int = 24
     ) -> list[WallpaperItem]:
         params = {
             "sorting": "random",
             "purity": "100",
-            "atleast": "1920x1080",
+            "atleast": self.min_resolution,
             "page": 1,
         }
         if query:
@@ -26,12 +30,14 @@ class WallhavenSource(WallpaperSource):
 
         pages_needed = max(1, (limit + 23) // 24)
         items = []
+        sess = get_session()
+        headers = {}
+        if self.api_key:
+            headers["X-API-Key"] = self.api_key
         for page in range(1, pages_needed + 1):
             params["page"] = page
             try:
-                resp = requests.get(
-                    f"{self.API_BASE}/search", params=params, timeout=15
-                )
+                resp = sess.get(f"{self.API_BASE}/search", params=params, headers=headers, timeout=15)
                 resp.raise_for_status()
                 data = resp.json()
                 for wp in data.get("data", []):
@@ -60,7 +66,7 @@ class WallhavenSource(WallpaperSource):
 
     def is_available(self) -> bool:
         try:
-            resp = requests.get(
+            resp = get_session().get(
                 f"{self.API_BASE}/search",
                 params={"page": 1, "sorting": "random", "purity": "100"},
                 timeout=10,

@@ -1,4 +1,4 @@
-import requests
+from core.cache import get_session
 from sources.base import WallpaperSource, WallpaperItem
 
 
@@ -32,11 +32,11 @@ class WallwidgySource(WallpaperSource):
             params["color"] = self.color
 
         try:
-            resp = requests.get(self.API_BASE, params=params, timeout=15)
+            resp = get_session().get(self.API_BASE, params=params, timeout=15)
             resp.raise_for_status()
             data = resp.json()
             items = []
-            for i, url in enumerate(data.get("wallpapers", [])):
+            for url in data.get("wallpapers", []):
                 name = url.split("/")[-1].rsplit(".", 1)[0]
                 items.append(
                     WallpaperItem(
@@ -55,7 +55,7 @@ class WallwidgySource(WallpaperSource):
 
     def is_available(self) -> bool:
         try:
-            resp = requests.get(
+            resp = get_session().get(
                 self.API_BASE, params={"type": "desktop", "count": 1}, timeout=10
             )
             return resp.status_code == 200

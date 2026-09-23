@@ -20,8 +20,11 @@ class TrayIcon:
     def start(self):
         menu = pystray.Menu(
             pystray.MenuItem("Open", self._on_show, default=True),
+            pystray.MenuItem("Play/Pause", self._on_toggle_play),
             pystray.MenuItem("Next Wallpaper", self._on_next),
             pystray.MenuItem("Previous Wallpaper", self._on_prev),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Like Current", self._on_like),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self._on_quit),
         )
@@ -39,18 +42,45 @@ class TrayIcon:
             self._icon.stop()
 
     def _on_show(self, icon, item):
-        self.app.after(0, self._show_window)
+        try:
+            self.app.after(0, self._show_window)
+        except Exception:
+            pass
 
     def _show_window(self):
-        self.app.deiconify()
-        self.app.lift()
-        self.app.focus_force()
+        try:
+            self.app.deiconify()
+            self.app.lift()
+            self.app.focus_force()
+        except Exception:
+            pass
+
+    def _on_toggle_play(self, icon, item):
+        try:
+            self.app.after(0, self.app._on_toggle_play)
+        except Exception:
+            pass
 
     def _on_next(self, icon, item):
-        self.app.after(0, self.app._on_next)
+        try:
+            self.app.after(0, self.app._on_next)
+        except Exception:
+            pass
 
     def _on_prev(self, icon, item):
-        self.app.after(0, self.app._on_prev)
+        try:
+            self.app.after(0, self.app._on_prev)
+        except Exception:
+            pass
+
+    def _on_like(self, icon, item):
+        try:
+            self.app.after(0, self.app._on_toggle_like)
+        except Exception:
+            pass
 
     def _on_quit(self, icon, item):
-        self.app.after(0, self.app._force_quit)
+        try:
+            self.app.after(0, self.app._force_quit)
+        except Exception:
+            pass

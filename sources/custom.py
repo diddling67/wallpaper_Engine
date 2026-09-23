@@ -1,25 +1,15 @@
-import re
-import requests
 from bs4 import BeautifulSoup
+from core.cache import get_session
 from sources.base import WallpaperSource, WallpaperItem, CompatibilityResult
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 MANIFEST_PATHS = [
-    "/image-manifest.txt",
-    "/index.json",
-    "/catalog/index.json",
-    "/all.json",
-    "/api/images",
-    "/images.json",
-    "/wallpapers.json",
+    "/image-manifest.txt", "/index.json", "/catalog/index.json",
+    "/all.json", "/api/images", "/images.json", "/wallpapers.json",
 ]
 API_PATTERNS = [
-    "?format=json",
-    "&format=json",
-    "?json=true",
-    "/api/v1/search",
-    "/api/wallpapers",
-    "/api/images",
+    "?format=json", "&format=json", "?json=true",
+    "/api/v1/search", "/api/wallpapers", "/api/images",
 ]
 OPENAPI_PATHS = ["/openapi.json", "/swagger.json", "/.well-known/schema-discovery"]
 
@@ -40,13 +30,16 @@ class CustomSource(WallpaperSource):
         self, query: str = None, category: str = None, limit: int = 24
     ) -> list[WallpaperItem]:
         if self._image_urls:
+            urls = self._image_urls
+            if query:
+                q = query.lower()
+                urls = [u for u in urls if q in u.lower()]
             items = [
                 WallpaperItem(
-                    url=u,
-                    source_name=self.name,
+                    url=u, source_name=self.name,
                     title=u.split("/")[-1].rsplit(".", 1)[0],
                 )
-                for u in self._image_urls
+                for u in urls
             ]
             return items[:limit]
         return []
@@ -56,18 +49,19 @@ class CustomSource(WallpaperSource):
 
     def is_available(self) -> bool:
         try:
-            resp = requests.head(self.base_url, timeout=10)
+            resp = get_session().head(self.base_url, timeout=10)
             return resp.status_code < 500
         except Exception:
             return False
 
     def probe(self) -> CompatibilityResult:
         result = CompatibilityResult(compatible=False)
-        headers = {"User-Agent": "ArchImgWallpaper/1.0"}
+        sess = get_session()
+        headers = {"User-Agent": "ArchImgWallpaper/2.0"}
 
         for path in MANIFEST_PATHS:
             try:
-                resp = requests.get(self.base_url + path, headers=headers, timeout=10)
+                resp = sess.get(self.base_url + path, headers=headers, timeout=10)
                 if resp.status_code == 200:
                     ct = resp.headers.get("Content-Type", "")
                     if "json" in ct or path.endswith(".json"):
@@ -86,28 +80,21 @@ class CustomSource(WallpaperSource):
                             return result
                     elif path.endswith(".txt"):
                         lines = [
-                            l.strip()
-                            for l in resp.text.splitlines()
-                            if l.strip()
-                            and any(
-                                l.strip().lower().endswith(e) for e in IMAGE_EXTS
-                            )
+                            l.strip() for l in resp.text.splitlines()
+                            if l.strip() and any(l.strip().lower().endswith(e) for e in IMAGE_EXTS)
                         ]
                         if lines:
                             result.compatible = True
                             result.source_type = "manifest"
                             result.image_count = len(lines)
-                            self._image_urls = [
-                                self.base_url + "/assets/" + l for l in lines
-                            ]
+                            self._image_urls = [self.base_url + "/assets/" + l for l in lines]
                             return result
             except Exception:
                 continue
 
         for pattern in API_PATTERNS:
             try:
-                test_url = self.base_url + pattern
-                resp = requests.get(test_url, headers=headers, timeout=10)
+                resp = sess.get(self.base_url + pattern, headers=headers, timeout=10)
                 if resp.status_code == 200:
                     ct = resp.headers.get("Content-Type", "")
                     if "json" in ct:
@@ -124,10 +111,8 @@ class CustomSource(WallpaperSource):
 
         for path in OPENAPI_PATHS:
             try:
-                resp = requests.get(self.base_url + path, headers=headers, timeout=10)
-                if resp.status_code == 200 and "json" in resp.headers.get(
-                    "Content-Type", ""
-                ):
+                resp = sess.get(self.base_url + path, headers=headers, timeout=10)
+                if resp.status_code == 200 and "json" in resp.headers.get("Content-Type", ""):
                     result.compatible = True
                     result.source_type = "openapi"
                     result.error_message = "OpenAPI found but endpoints need manual configuration"
@@ -136,7 +121,7 @@ class CustomSource(WallpaperSource):
                 continue
 
         try:
-            resp = requests.get(self.base_url, headers=headers, timeout=10)
+            resp = sess.get(self.base_url, headers=headers, timeout=10)
             if resp.status_code == 200:
                 soup = BeautifulSoup(resp.text, "lxml")
                 img_urls = []
@@ -156,8 +141,8 @@ class CustomSource(WallpaperSource):
             pass
 
         result.error_message = (
-            "Could not find compatible API, manifest, or image listings at this URL. "
-            "The site may require authentication, use a non-standard format, or not serve wallpapers."
+            "Could not find compatible API, manifest, or image listings. "
+            "The site may require authentication or not serve wallpapers."
         )
         return result
 
@@ -167,9 +152,7 @@ class CustomSource(WallpaperSource):
         urls = []
         if isinstance(data, dict):
             for key, val in data.items():
-                if isinstance(val, str) and any(
-                    val.lower().endswith(e) for e in IMAGE_EXTS
-                ):
+                if isinstance(val, str) and any(val.lower().endswith(e) for e in IMAGE_EXTS):
                     urls.append(val)
                 elif isinstance(val, (dict, list)):
                     urls.extend(self._extract_urls_from_json(val, depth + 1))

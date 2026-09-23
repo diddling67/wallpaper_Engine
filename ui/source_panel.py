@@ -1,4 +1,6 @@
+import threading
 import customtkinter as ctk
+from sources.wallwidgy import WallwidgySource
 
 
 class SourceSettingsDialog(ctk.CTkToplevel):
@@ -8,12 +10,21 @@ class SourceSettingsDialog(ctk.CTkToplevel):
         self.registry = registry
         self.config = config
         self.source = registry.get(source_name)
+        self._after_ids: list[str] = []
 
         self.title(f"{source_name} Settings")
-        self.geometry("400x350")
+        self.geometry("420x400")
         self.resizable(False, False)
 
+        self.after(50, self._ensure_on_top)
         self._build_ui()
+
+    def _ensure_on_top(self):
+        self.lift()
+        self.focus_force()
+        self.attributes("-topmost", True)
+        tid = self.after(300, lambda: self.attributes("-topmost", False))
+        self._after_ids.append(tid)
 
     def _build_ui(self):
         ctk.CTkLabel(
@@ -39,9 +50,7 @@ class SourceSettingsDialog(ctk.CTkToplevel):
 
         ctk.CTkLabel(frame, text="Search query:").pack(anchor="w")
         self._query_entry = ctk.CTkEntry(
-            frame,
-            placeholder_text="nature, cyberpunk, linux...",
-            width=350,
+            frame, placeholder_text="nature, cyberpunk, linux...", width=350,
         )
         self._query_entry.pack(fill="x", pady=(0, 10))
         self._query_entry.insert(0, self.config.get("wallhaven_query", ""))
@@ -51,14 +60,15 @@ class SourceSettingsDialog(ctk.CTkToplevel):
             value=self.config.get("wallhaven_min_resolution", "1920x1080")
         )
         ctk.CTkOptionMenu(
-            frame,
-            variable=self._res_var,
+            frame, variable=self._res_var,
             values=["1280x720", "1920x1080", "2560x1440", "3840x2160"],
             width=200,
         ).pack(anchor="w", pady=(0, 10))
 
         ctk.CTkLabel(frame, text="API key (optional, for NSFW):").pack(anchor="w")
-        self._api_key_entry = ctk.CTkEntry(frame, placeholder_text="API key...", width=350, show="*")
+        self._api_key_entry = ctk.CTkEntry(
+            frame, placeholder_text="API key...", width=350, show="*"
+        )
         self._api_key_entry.pack(fill="x", pady=(0, 10))
         self._api_key_entry.insert(0, self.config.get("wallhaven_api_key", ""))
 
@@ -69,25 +79,19 @@ class SourceSettingsDialog(ctk.CTkToplevel):
         frame.pack(fill="x", padx=20, pady=5)
 
         ctk.CTkLabel(frame, text="Category:").pack(anchor="w")
-        self._cat_var = ctk.StringVar(
-            value=self.config.get("wallwidgy_category", "all")
-        )
+        saved_cat = self.config.get("wallwidgy_category", "all")
+        self._cat_var = ctk.StringVar(value=saved_cat)
         ctk.CTkOptionMenu(
-            frame,
-            variable=self._cat_var,
-            values=["all", "abstract", "anime", "architecture", "art", "cars", "minimal", "nature", "tech"],
-            width=200,
+            frame, variable=self._cat_var,
+            values=WallwidgySource.CATEGORIES, width=200,
         ).pack(anchor="w", pady=(0, 10))
 
         ctk.CTkLabel(frame, text="Color:").pack(anchor="w")
-        self._color_var = ctk.StringVar(
-            value=self.config.get("wallwidgy_color", "all")
-        )
+        saved_color = self.config.get("wallwidgy_color", "all")
+        self._color_var = ctk.StringVar(value=saved_color)
         ctk.CTkOptionMenu(
-            frame,
-            variable=self._color_var,
-            values=["all", "blue", "red", "green", "purple", "pink", "orange", "yellow", "black", "white"],
-            width=200,
+            frame, variable=self._color_var,
+            values=WallwidgySource.COLORS, width=200,
         ).pack(anchor="w", pady=(0, 10))
 
         ctk.CTkButton(frame, text="Save", command=self._save_wallwidgy).pack(pady=10)
@@ -98,9 +102,7 @@ class SourceSettingsDialog(ctk.CTkToplevel):
 
         ctk.CTkLabel(frame, text="Search query:").pack(anchor="w")
         self._query_entry = ctk.CTkEntry(
-            frame,
-            placeholder_text="nature, landscape, sunset...",
-            width=350,
+            frame, placeholder_text="nature, landscape, sunset...", width=350,
         )
         self._query_entry.pack(fill="x", pady=(0, 10))
         self._query_entry.insert(0, self.config.get("openverse_query", "wallpaper nature landscape"))
@@ -108,20 +110,41 @@ class SourceSettingsDialog(ctk.CTkToplevel):
         ctk.CTkButton(frame, text="Save", command=self._save_openverse).pack(pady=10)
 
     def _save_wallhaven(self):
+        api_key = self._api_key_entry.get().strip()
+        min_res = self._res_var.get()
         self.config.update({
             "wallhaven_query": self._query_entry.get().strip(),
-            "wallhaven_min_resolution": self._res_var.get(),
-            "wallhaven_api_key": self._api_key_entry.get().strip(),
+            "wallhaven_min_resolution": min_res,
+            "wallhaven_api_key": api_key,
         })
+        src = self.registry.get("Wallhaven")
+        if src:
+            src.api_key = api_key
+            src.min_resolution = min_res
         self.destroy()
 
     def _save_wallwidgy(self):
+        cat = self._cat_var.get()
+        color = self._color_var.get()
         self.config.update({
-            "wallwidgy_category": self._cat_var.get(),
-            "wallwidgy_color": self._color_var.get(),
+            "wallwidgy_category": cat,
+            "wallwidgy_color": color,
         })
+        src = self.registry.get("Wallwidgy")
+        if src and isinstance(src, WallwidgySource):
+            src.category = cat
+            src.color = color
         self.destroy()
 
     def _save_openverse(self):
         self.config.set("openverse_query", self._query_entry.get().strip())
         self.destroy()
+
+    def destroy(self):
+        for tid in self._after_ids:
+            try:
+                self.after_cancel(tid)
+            except Exception:
+                pass
+        self._after_ids.clear()
+        super().destroy()

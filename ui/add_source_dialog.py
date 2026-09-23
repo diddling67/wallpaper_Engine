@@ -27,7 +27,8 @@ class AddSourceDialog(ctk.CTkToplevel):
         self.lift()
         self.focus_force()
         self.attributes("-topmost", True)
-        self.after(300, lambda: self.attributes("-topmost", False))
+        tid = self.after(300, lambda: self.attributes("-topmost", False))
+        self._after_ids.append(tid)
 
     def _build_ui(self):
         ctk.CTkLabel(
@@ -230,11 +231,11 @@ class AddSourceDialog(ctk.CTkToplevel):
         self._custom_source.base_url = url.rstrip("/")
         self.registry.sources[name] = self._custom_source
 
-        custom_sources = self.config.get("custom_sources", [])
+        custom_sources = list(self.config.get("custom_sources", []))
         custom_sources.append({"url": url, "name": name})
         self.config.set("custom_sources", custom_sources)
 
-        enabled = self.config.get("enabled_sources", [])
+        enabled = list(self.config.get("enabled_sources", []))
         if name not in enabled:
             enabled.append(name)
             self.config.set("enabled_sources", enabled)
