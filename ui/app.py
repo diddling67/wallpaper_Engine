@@ -501,6 +501,8 @@ class ArchImgApp(ctk.CTk):
                     font=ctk.CTkFont(size=11),
                     command=lambda n=name, v=var: self._on_source_toggle(n, v.get()),
                 )
+                if self.registry.is_custom(name):
+                    cb.bind("<Button-3>", lambda e, n=name: self._show_source_context_menu(e, n))
                 if color:
                     cb.configure(text_color=color)
                 cb.pack(side="left", padx=(0, 10))
@@ -545,6 +547,27 @@ class ArchImgApp(ctk.CTk):
         self.config.set("enabled_sources", current)
         self._update_single_source_menu()
         self._update_categories()
+
+    def _show_source_context_menu(self, event, name: str):
+        import tkinter as tk
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(
+            label=f"Remove {name}",
+            command=lambda: self._on_remove_source(name),
+        )
+        menu.tk_popup(event.x_root, event.y_root)
+        menu.bind("<FocusOut>", lambda e: menu.destroy())
+        menu.focus_set()
+
+    def _on_remove_source(self, name: str):
+        self.registry.remove(name)
+        current = list(self.config.get("enabled_sources", []))
+        if name in current:
+            current.remove(name)
+            self.config.set("enabled_sources", current)
+        self._refresh_sources()
+        self._check_source_health()
+        self._status_label.configure(text=f"Removed source: {name}", text_color="#4CAF50")
 
     def _on_mode_change(self, mode: str):
         self.config.set("playlist_mode", mode)

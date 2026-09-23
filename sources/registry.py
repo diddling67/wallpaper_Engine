@@ -53,6 +53,9 @@ class SourceRegistry:
     def get(self, name: str) -> WallpaperSource | None:
         return self.sources.get(name)
 
+    def is_custom(self, name: str) -> bool:
+        return name not in BUILTIN_SOURCES
+
     def get_all(self) -> dict[str, WallpaperSource]:
         return dict(self.sources)
 
